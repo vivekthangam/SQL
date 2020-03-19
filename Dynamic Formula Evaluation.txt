@@ -1,0 +1,681 @@
+/*Added By Vivek Thangam MIG-20190606001*/
+
+
+CREATE OR REPLACE PROCEDURE ATISADMIN.SP_VALIDATE_RFFORMULA(
+    p_formula_id in VARCHAR2,
+    p_fixed_amount_1 NUMBER,
+    p_fixed_amount_2 NUMBER,
+    p_fixed_amount_3 NUMBER,
+    p_fixed_fx_1 NUMBER,
+    p_fixed_fx_2 NUMBER,
+    p_number NUMBER,
+    p_margin_basis_points NUMBER,
+    p_min_rate NUMBER,
+    p_max_rate NUMBER,
+    p_min_amt NUMBER,
+    p_max_amt NUMBER,
+    p_error_msg OUT     VARCHAR2
+    ) IS
+        L_REFE_RATE NUMBER;
+        L_REC ATISADMIN.CRFFORMULA_VARIABLES%ROWTYPE;        
+        L_FORMULA_ID            VARCHAR2(20);
+        L_FORMULA_EXPR            VARCHAR2(500);
+        L_FORMULA            VARCHAR2(500);
+        L_FORMULA_POS            NUMBER;
+
+        TYPE variable_array IS TABLE OF NUMBER INDEX BY VARCHAR2(100);
+        l_variable variable_array ;
+        CURSOR CUR_CRFFORMULA_VARIABLE(V_FORMULA_ID IN  VARCHAR2) IS 
+         SELECT VARIABLE_ID,VARIABLE_NAME,VARIABLE_DESC,IS_REF_RATE FROM ATISADMIN.CRFFORMULA_VARIABLES
+            WHERE 
+                VARIABLE_ID IN ( 
+            SELECT
+                 VARIABLE_ID         
+            FROM
+                 ATISADMIN.CRFFORMULA_DTL
+            WHERE
+                FORMULA_ID=V_FORMULA_ID);                     
+BEGIN
+	L_FORMULA_ID:=p_formula_id;
+	SELECT UPPER(FORMULA_EXPR) INTO L_FORMULA_EXPR FROM ATISADMIN.CRFFORMULA	WHERE	FORMULA_ID =L_FORMULA_ID;
+	L_FORMULA_EXPR:=REPLACE(L_FORMULA_EXPR,' ','');
+	if p_fixed_amount_1 IS NOT NULL AND p_fixed_amount_1 <>-1 THEN 
+		l_variable('FixAmt1'):=p_fixed_amount_1;
+	END IF;    
+	if p_fixed_amount_2 IS NOT NULL AND p_fixed_amount_2 <> -1 THEN 
+		l_variable('FixAmt2'):=p_fixed_amount_2;
+	END IF;
+	if p_fixed_amount_3 IS NOT NULL AND p_fixed_amount_3 <> -1  THEN 
+		 l_variable('FixAmt3'):=p_fixed_amount_3;
+	END IF;
+	if p_fixed_fx_1 IS NOT NULL AND p_fixed_fx_1<> -1 THEN 
+		l_variable('FixFX1'):=p_fixed_fx_1;
+	END IF;
+	if p_fixed_fx_2 IS NOT NULL AND p_fixed_fx_2 <> -1  THEN 
+		l_variable('FixFX2'):=p_fixed_fx_2;
+	END IF;
+	if p_number IS NOT NULL AND p_number <> -1 THEN 
+		 l_variable('Number'):=p_number;
+	END IF;
+	 if p_margin_basis_points IS NOT NULL AND p_margin_basis_points <> -1 THEN 
+		l_variable('Margin'):=p_margin_basis_points;
+	END IF;
+	if p_min_rate IS NOT NULL AND p_min_rate <> -1 THEN 
+			l_variable('MinRate'):=p_min_rate;
+	END IF;
+	if p_max_rate IS NOT NULL AND p_max_rate<> -1 THEN 
+			l_variable('MaxRate'):=p_max_rate;
+	END IF;
+	if p_min_amt IS NOT NULL AND p_min_amt <> -1 THEN 
+			l_variable('MinAmt'):=p_min_amt;
+	END IF;
+	if p_max_amt IS NOT NULL AND p_max_amt <> -1 THEN 
+		l_variable('MaxAmt'):=p_max_amt;        
+	END IF;
+	
+	L_FORMULA_POS:=INSTR(L_FORMULA_EXPR,'=');
+	L_FORMULA:=SUBSTR(L_FORMULA_EXPR,L_FORMULA_POS+1,LENGTH(L_FORMULA_EXPR)-L_FORMULA_POS);
+	OPEN CUR_CRFFORMULA_VARIABLE(L_FORMULA_ID);
+	LOOP 
+		FETCH CUR_CRFFORMULA_VARIABLE INTO L_REC;
+			EXIT WHEN CUR_CRFFORMULA_VARIABLE%NOTFOUND;
+				IF INSTR(L_FORMULA,UPPER(L_REC.VARIABLE_NAME)) > 0 THEN
+					IF L_REC.VARIABLE_NAME <> 'RefRate1' AND L_REC.VARIABLE_NAME <> 'RefRate2' AND L_REC.VARIABLE_NAME <> 'RefRate3' THEN                            
+					IF l_variable.EXISTS(L_REC.VARIABLE_NAME)  AND l_variable(L_REC.VARIABLE_NAME) IS NOT NULL  AND TO_NUMBER(l_variable(L_REC.VARIABLE_NAME)) <> -1 THEN                            
+						L_FORMULA:=replace(L_FORMULA,UPPER(L_REC.VARIABLE_NAME),UPPER(l_variable(L_REC.VARIABLE_NAME)));		
+					ELSE
+						IF p_error_msg IS NOT NULL THEN
+							p_error_msg:=p_error_msg || ',' || L_REC.VARIABLE_NAME;
+						ELSE
+								p_error_msg:=L_REC.VARIABLE_NAME;
+						END IF;
+					END IF;
+				END IF;
+				END IF;                    
+	END LOOP;
+	IF p_error_msg IS NOT NULL THEN
+		p_error_msg:= p_error_msg || ' cannot be null for ' || L_FORMULA_ID ;
+	END IF;
+EXCEPTION WHEN OTHERS THEN
+	p_error_msg := substr('ERROR_STACK: ' || dbms_utility.format_error_stack || 'ERROR_BACKTRACE: '  || dbms_utility.format_error_backtrace,1,4000);
+END SP_VALIDATE_RFFORMULA;
+/
+CREATE PUBLIC SYNONYM SP_VALIDATE_RFFORMULA FOR ATISADMIN.SP_VALIDATE_RFFORMULA;
+
+CREATE OR REPLACE FUNCTION ATISADMIN.FN_EVALUATE_RFFORMULA(p_expression IN VARCHAR2) RETURN VARCHAR2 is
+		l_int_agg_pos NUMBER;
+		l_int_end_pos NUMBER;
+		l_int_total NUMBER;
+		l_str_formula VARCHAR2(100);
+		l_str_tokens VARCHAR2(100);
+		res VARCHAR2(100);
+		l_str_split VARCHAR2(100);
+
+		FUNCTION ischeckCondition(p_expression IN VARCHAR2) RETURN BOOLEAN IS
+			ret_val BOOLEAN;
+		BEGIN 
+				ret_val:=FALSE;
+				IF INSTR(p_expression,'IF') >0 THEN 
+					ret_val:= TRUE; 
+				END IF; 
+			RETURN ret_val;
+		END;
+
+		FUNCTION ischeckAggregation(p_expression IN VARCHAR2) RETURN BOOLEAN IS
+			ret_val BOOLEAN;
+		BEGIN 
+			IF INSTR(p_expression,'SUM') > 0 THEN
+				ret_val:= TRUE; 
+			END IF;
+			IF INSTR(p_expression,'AVG') > 0 THEN 
+				ret_val:= TRUE;
+			END IF;
+			IF INSTR(p_expression,'MIN') > 0 THEN 
+				ret_val:= TRUE; 
+			END IF; 
+			IF INSTR(p_expression,'MAX') > 0 THEN 
+				ret_val:= TRUE; 
+			END IF; 
+			RETURN ret_val;
+		END;
+
+		FUNCTION evaluate_expression(p_expression IN VARCHAR2) RETURN NUMBER IS
+			ret_val NUMBER;
+			sep VARCHAR2(1) := '|';
+			operand_stack VARCHAR2(4000) := sep;
+			operator_stack VARCHAR2(4000) := sep;
+			w_expression VARCHAR2(4000) := REPLACE(p_expression,' ','');
+			i pls_integer := 1;
+			next_char VARCHAR2(1);
+			num_in BOOLEAN := FALSE;
+			top_operator VARCHAR2(100);
+			left_operand VARCHAR2(100);
+			right_operand VARCHAR2(100);
+
+			FUNCTION pop_stack(p_stack IN OUT VARCHAR2) RETURN VARCHAR2 IS
+				ret_val VARCHAR2(4000);
+			BEGIN
+				ret_val := rtrim(SUBSTR(p_stack,INSTR(p_stack,sep,-1,2) + 1),sep);
+				p_stack := SUBSTR(p_stack,1,INSTR(p_stack,ret_val||sep,-1,1) - 1);
+				RETURN ret_val;
+			END;
+
+			FUNCTION peek_stack(p_stack IN VARCHAR2) RETURN VARCHAR2 IS
+				ret_val VARCHAR2(4000);
+			BEGIN
+				ret_val := SUBSTR(rtrim(p_stack,sep),INSTR(rtrim(p_stack,sep),sep,-1) + 1);
+				RETURN ret_val;
+			END;
+
+			PROCEDURE push_stack(p_stack IN OUT VARCHAR2,p_item IN VARCHAR2) IS
+			BEGIN
+				p_stack := p_stack || p_item || sep;
+			END;
+
+			FUNCTION is_empty(p_stack IN VARCHAR2) RETURN BOOLEAN IS
+				ret_val BOOLEAN;
+			BEGIN
+				IF p_stack = sep THEN
+					ret_val := TRUE;
+				ELSE
+					ret_val := FALSE;
+				END IF;
+				RETURN ret_val;
+			END;
+
+			FUNCTION precedence(p_operator IN VARCHAR2) RETURN pls_integer IS
+				ret_val pls_integer;
+			BEGIN
+				IF p_operator IN ('+','-') THEN 
+					ret_val := 1;
+				ELSIF p_operator IN ('*','/') THEN 
+					ret_val := 2;
+				ELSIF p_operator IN ('^') THEN 
+					ret_val := 3;
+				ELSIF p_operator IN ('(') THEN 
+					ret_val := 0;
+				ELSIF p_operator IN (')') THEN 
+					ret_val := 0;
+				ELSE
+					ret_val := 4;
+				END IF;
+				RETURN ret_val;
+			END;
+
+			FUNCTION evaluate_operation(p_left IN VARCHAR2,p_right IN VARCHAR2,p_operator IN VARCHAR2) RETURN NUMBER IS
+				ret_val NUMBER := TO_NUMBER(NULL);
+			BEGIN
+				IF p_operator = '+' THEN
+					ret_val := TO_NUMBER(p_left) + TO_NUMBER(p_right);
+				ELSIF p_operator = '-' THEN
+					ret_val := TO_NUMBER(p_left) - TO_NUMBER(p_right);
+				ELSIF p_operator = '*' THEN
+					ret_val := TO_NUMBER(p_left) * TO_NUMBER(p_right);
+				ELSIF p_operator = '/' THEN
+					ret_val := TO_NUMBER(p_left) / TO_NUMBER(p_right);
+				ELSIF p_operator = '^' THEN
+					ret_val := power(p_left,p_right);
+				END IF;
+				RETURN ret_val;
+			END;
+
+			PROCEDURE treat_operand(p_char IN VARCHAR2) IS
+			BEGIN
+				operand_stack := operand_stack || p_char;
+			END;
+
+			PROCEDURE treat_operator(p_char IN VARCHAR2) IS
+				done BOOLEAN := FALSE;
+				result NUMBER;
+			BEGIN
+				IF num_in THEN
+					push_stack(operand_stack,'');
+					num_in := FALSE;
+				END IF;
+				WHILE NOT done LOOP
+					IF is_empty(operator_stack) or p_char = '(' THEN
+						push_stack(operator_stack,p_char);
+						done := TRUE;
+					ELSE
+						top_operator := peek_stack(operator_stack);
+						IF precedence(p_char) > precedence(top_operator) THEN
+							push_stack(operator_stack,p_char);
+							done := TRUE;
+						ELSE
+							top_operator := pop_stack(operator_stack);
+						IF top_operator = '(' THEN
+							done := TRUE;
+						ELSE 
+							right_operand := pop_stack(operand_stack);
+							left_operand := pop_stack(operand_stack);
+							result := evaluate_operation(left_operand,right_operand,top_operator);
+							push_stack(operand_stack,TO_CHAR(result));
+						END IF;
+						END IF;
+					END IF;
+				END LOOP;
+			END;
+		BEGIN
+			IF SUBSTR(w_expression,1,1) = '-' THEN
+				w_expression := '0' || w_expression;
+			ELSIF SUBSTR(w_expression,1,1) = '+' THEN
+				w_expression := SUBSTR(w_expression,2);
+			END IF;
+				w_expression := REPLACE(REPLACE(w_expression,'(-','(0-'),'(+','(');
+			WHILE TRUE LOOP
+				next_char := SUBSTR(w_expression,i,1);
+				EXIT WHEN next_char IS NULL;
+					IF next_char IN ('0','1','2','3','4','5','6','7','8','9','.') THEN
+						treat_operand(next_char);
+						num_in := TRUE;
+					ELSIF next_char IN ('+','-','*','/','^','(',')') THEN
+						treat_operator(next_char);
+					END IF;
+				i := i + 1;
+			END LOOP;
+			IF num_in THEN
+				push_stack(operand_stack,'');
+			END IF;
+			WHILE NOT is_empty(operator_stack) LOOP
+				top_operator := pop_stack(operator_stack);
+				right_operand := pop_stack(operand_stack);
+				left_operand := pop_stack(operand_stack);
+				ret_val := evaluate_operation(left_operand,right_operand,top_operator);
+				push_stack(operand_stack,TO_CHAR(ret_val));
+			END LOOP;
+				left_operand := pop_stack(operand_stack);
+				ret_val := TO_NUMBER(left_operand);
+			IF is_empty(operand_stack) AND is_empty(operator_stack) THEN
+				RETURN ret_val;
+			ELSE 
+				RETURN TO_NUMBER(NULL);
+			END IF;
+		END;
+		FUNCTION Evaluate_Aggregation(p_string IN VARCHAR2) RETURN VARCHAR2 IS
+			l_int_agg_pos  NUMBER;     	
+			l_int_end_pos  NUMBER;     
+			l_int_total  NUMBER;     
+			l_str_tokens  VARCHAR2(400);
+			l_str_agg  VARCHAR2(400);
+			l_str_res  VARCHAR2(400);
+			l_temp_formula  VARCHAR2(400);
+			l_int_tmp  NUMBER;     
+			i pls_integer := 1;
+			TYPE v_array IS VARRAY(100) of VARCHAR2(500);
+			FUNCTION split_strig(p_string IN VARCHAR2) RETURN v_array IS
+				l_arr_value v_array:=v_array();
+				l_string VARCHAR2(500):=p_string;
+				l_strtemp VARCHAR2(500):=NULL;
+				l_total NUMBER;
+				l_count NUMBER:=0;
+				l_pos NUMBER:=0;
+				l_iter NUMBER:=0;
+				l_next_char VARCHAR2(1);
+			BEGIN
+				l_total:=LENGTH(l_string);
+				WHILE TRUE LOOP
+					l_next_char := SUBSTR(l_string,l_iter,1);        
+					EXIT WHEN l_next_char IS NULL;
+					IF l_next_char IN ('0','1','2','3','4','5','6','7','8','9','+','-','*','/','.') THEN 
+						l_strtemp:=CONCAT(l_strtemp,l_next_char);
+					ELSIF l_next_char IN ('(',')',',') THEN 
+						IF l_strtemp IS NOT NULL THEN
+						l_count:=l_count+1;
+						l_arr_value.extend;        
+						l_arr_value(l_count):=l_strtemp;		
+						l_strtemp:=NULL;
+						END IF ;
+					END if;
+					l_iter := l_iter+ 1;
+				END LOOP;
+				RETURN l_arr_value; 
+			END;
+			
+			FUNCTION Evaluate_Aggregation_Function(p_string IN VARCHAR2,p_aggregation IN VARCHAR2) RETURN VARCHAR2 IS
+				l_arr_value v_array:=v_array();
+				l_string VARCHAR2(500):=p_string;
+				avg_val NUMBER;
+				l_temp  NUMBER;
+				max_val NUMBER;
+				min_val NUMBER;
+				result_val NUMBER;
+				result_temp VARCHAR2(100);
+			BEGIN         
+				l_arr_value:=split_strig(l_string);
+				CASE p_aggregation
+					WHEN 'SUM' THEN 
+						result_val:=0;        
+						l_arr_value:=split_strig(l_string);
+						FOR i IN 1..l_arr_value.COUNT LOOP
+						result_val:=result_val+evaluate_expression(l_arr_value(i));     
+						END LOOP;
+					WHEN 'AVG' THEN 
+						result_val:=0;
+						l_arr_value:=split_strig(l_string);
+						FOR i IN 1..l_arr_value.COUNT LOOP
+						result_val:=result_val+evaluate_expression(l_arr_value(i));  
+						END LOOP;
+						result_val:=result_val/l_arr_value.COUNT;
+					WHEN 'MAX' THEN 
+						l_arr_value:=split_strig(l_string);		
+						result_val:=evaluate_expression(l_arr_value(i));
+						FOR i IN 1..l_arr_value.COUNT LOOP
+						l_temp:=evaluate_expression(l_arr_value(i));
+						IF result_val < l_temp THEN
+						result_val := l_temp;
+						END IF;
+						END LOOP;
+					WHEN 'MIN' THEN 
+						l_arr_value:=split_strig(l_string);		
+						result_val:=evaluate_expression(l_arr_value(i));
+						FOR i IN 1..l_arr_value.COUNT LOOP	
+						l_temp:=evaluate_expression(l_arr_value(i));
+						IF result_val > l_temp THEN
+						result_val := l_temp;
+						END IF;
+						END LOOP;  
+				END CASE;
+				RETURN TO_CHAR(result_val);
+			END;  
+			
+			FUNCTION AggregationPostion(p_expression IN VARCHAR2) RETURN VARCHAR2 IS	
+				l_int_sum NUMBER;
+				l_int_avg NUMBER;
+				l_int_max NUMBER;
+				l_int_min NUMBER;
+			BEGIN 
+				l_int_sum :=INSTR(p_expression,'SUM');
+				l_int_avg :=INSTR(p_expression,'AVG');
+				l_int_max :=INSTR(p_expression,'MAX');
+				l_int_min :=INSTR(p_expression,'MIN');
+				IF l_int_sum > l_int_avg AND l_int_sum > l_int_max AND l_int_sum > l_int_min THEN
+					RETURN 'SUM';
+				ELSIF l_int_avg > l_int_max AND l_int_avg > l_int_min THEN   
+					RETURN 'AVG';
+				ELSIF l_int_max > l_int_min THEN
+					RETURN 'MAX';
+				ELSE
+					RETURN 'MIN';
+				END If;
+				RETURN NULL;
+			END;
+			
+			FUNCTION ischeckAggregation(p_expression IN VARCHAR2) RETURN BOOLEAN IS
+				ret_val BOOLEAN;
+			BEGIN 
+				IF INSTR(p_expression,'SUM') > 0 THEN
+				ret_val:= TRUE; 
+			END IF;
+				IF INSTR(p_expression,'AVG') > 0 THEN 
+				ret_val:= TRUE;
+			END IF;
+				IF INSTR(p_expression,'MIN') > 0 THEN 
+				ret_val:= TRUE; 
+			END IF; 
+				IF INSTR(p_expression,'MAX') > 0 THEN 
+				ret_val:= TRUE; 
+			END IF; 
+				RETURN ret_val;
+			END;
+			BEGIN 
+				l_temp_formula := UPPER(p_string);	
+			WHILE ischeckAggregation(l_temp_formula) LOOP
+				l_int_total  := LENGTH(l_temp_formula);
+				l_str_agg := AggregationPostion(l_temp_formula);
+				l_int_agg_pos := INSTR(l_temp_formula,l_str_agg,-1);
+				l_int_tmp := l_int_agg_pos + LENGTH(l_str_agg)+1;
+				l_str_tokens:=SUBSTR(l_temp_formula,l_int_tmp,l_int_total - l_int_tmp+1);			
+				l_int_end_pos := l_int_agg_pos + INSTR(SUBSTR(l_temp_formula,l_int_agg_pos,LENGTH(l_temp_formula) - l_int_agg_pos+1),')');			
+				l_str_res := Evaluate_Aggregation_Function(SUBSTR(l_temp_formula,l_int_tmp-1, INSTR(l_str_tokens,')')+1),l_str_agg);  
+				l_temp_formula := SUBSTR(l_temp_formula,0, l_int_agg_pos-1) || l_str_res || SUBSTR(l_temp_formula,l_int_end_pos , l_int_total - l_int_end_pos +1);
+			END LOOP;            
+			RETURN l_temp_formula;
+		END;
+		
+		FUNCTION Eval_Condition(p_expression IN VARCHAR2) RETURN VARCHAR2 IS
+			l_expression  VARCHAR2(100);
+			ret_val VARCHAR2(100);
+			rightoperand VARCHAR2(100);
+			leftoperand VARCHAR2(100);
+			opertaor VARCHAR2(100);
+			condition VARCHAR2(100);
+			l_next_char VARCHAR2(1);
+			l_next_char1 VARCHAR2(1);
+			l_iter NUMBER;
+			resultflag BOOLEAN;
+		BEGIN 
+			l_expression:=  UPPER(p_expression);
+			l_iter:=1;
+			ret_val:=NULL;
+			l_expression:=Evaluate_Aggregation(l_expression);
+			condition:=SUBSTR(l_expression,INSTR(l_expression,'IF')+2,INSTR(l_expression,'THEN') -INSTR(l_expression,'IF')-2);       
+			WHILE TRUE LOOP
+				l_next_char := SUBSTR(condition,l_iter,1);
+				EXIT WHEN l_next_char IS NULL or opertaor IS NOT NULL;
+					IF l_next_char IN ('>','<','=') THEN 
+						l_next_char1 := SUBSTR(condition,l_iter+1,1);
+					IF l_next_char1 IN ('>','<','=') THEN 
+						opertaor:=CONCAT(l_next_char,l_next_char1);
+					ELSE
+						opertaor:=l_next_char;
+					END IF;
+					END IF;
+				l_iter := l_iter+ 1;
+			END LOOP;
+			IF LENGTH(opertaor) =2 THEN
+				leftoperand:=evaluate_expression(SUBSTR(condition,1,INSTR(condition,opertaor)+1));
+				rightoperand:=evaluate_expression(SUBSTR(condition,INSTR(condition,opertaor)+1));
+			ELSIF LENGTH(opertaor) =1 THEN
+				leftoperand:=evaluate_expression(SUBSTR(condition,1,INSTR(condition,opertaor)-1));
+				rightoperand:=evaluate_expression(SUBSTR(condition,INSTR(condition,opertaor)-1));
+			END IF;    
+			CASE opertaor
+				WHEN '>' THEN 
+					IF leftoperand > rightoperand THEN
+						resultflag:=TRUE;
+					ELSE
+						resultflag:=FALSE;   
+					END IF;
+				WHEN '<' THEN 
+					IF leftoperand < rightoperand THEN
+						resultflag:=TRUE;
+					ELSE
+						resultflag:=FALSE;   
+					END IF;
+				WHEN '=' THEN 
+					IF leftoperand = rightoperand THEN
+						resultflag:=TRUE;
+					ELSE
+						resultflag:=FALSE;   
+					END IF;
+				WHEN '>=' THEN 
+					IF leftoperand > rightoperand THEN
+						resultflag:=TRUE;
+					ELSIF leftoperand = rightoperand THEN
+						resultflag:=TRUE;
+					ELSE
+						resultflag:=FALSE;   
+					END IF;
+				WHEN '<=' THEN 
+					IF leftoperand < rightoperand THEN
+						resultflag:=TRUE;
+					ELSIF leftoperand = rightoperand THEN
+						resultflag:=TRUE;
+					ELSE
+						resultflag:=FALSE;   
+					END IF;
+				WHEN '==' THEN 
+					IF leftoperand = rightoperand THEN
+						resultflag:=TRUE;
+					ELSE
+						resultflag:=FALSE;   
+					END IF;
+				WHEN '=>' THEN 
+					IF leftoperand = rightoperand THEN
+						resultflag:=TRUE;
+					ELSIF leftoperand > rightoperand THEN
+						resultflag:=TRUE;
+					ELSE
+						resultflag:=FALSE;   
+					END IF;
+				WHEN '=<' THEN 
+					IF leftoperand = rightoperand THEN
+						resultflag:=TRUE;
+					ELSIF leftoperand < rightoperand THEN
+						resultflag:=TRUE;
+					ELSE
+						resultflag:=FALSE;   
+					END IF;
+			END CASE;
+
+			IF  resultflag=TRUE THEN 
+				ret_val:=TO_CHAR(SUBSTR(l_expression,INSTR(l_expression,'THEN')+4,INSTR(l_expression,'ELSE')-INSTR(l_expression,'THEN')-4));        
+			ELSE
+				ret_val:=TO_CHAR(SUBSTR(l_expression,INSTR(l_expression,'ELSE')+4,INSTR(l_expression,'END')-INSTR(l_expression,'ELSE')-4));
+			END IF;  
+			RETURN ret_val;
+		END;
+		
+	BEGIN
+		l_str_formula := UPPER(p_expression);
+		l_int_total := LENGTH(p_expression);
+		l_str_split := UPPER(p_expression);
+
+		WHILE  ischeckCondition(l_str_split) LOOP	    
+			l_int_agg_pos := INSTR(l_str_split,'IF',-1);
+			l_str_tokens := SUBSTR(l_str_split,l_int_agg_pos,LENGTH(l_str_split) - l_int_agg_pos+1);        
+			l_int_END_pos := INSTR(l_str_tokens,'END') +3;
+			l_str_tokens := SUBSTR(l_str_tokens,0,l_int_end_pos);
+			WHILE ischeckAggregation(l_str_tokens) LOOP
+				l_str_tokens := Evaluate_Aggregation(l_str_tokens);
+			END LOOP;
+			res := Eval_Condition(l_str_tokens);
+			l_str_split := SUBSTR(l_str_split,0, l_int_agg_pos-1) || res || SUBSTR(l_str_split,l_int_end_pos + l_int_agg_pos-1, LENGTH(l_str_split)- l_int_end_pos - l_int_agg_pos+2);
+		END LOOP;
+		WHILE ischeckAggregation(l_str_split) LOOP    
+			l_str_split:=Evaluate_Aggregation(l_str_split);
+		END LOOP;        
+		l_str_split:=evaluate_expression(l_str_split);
+		RETURN l_str_split;
+	END FN_EVALUATE_RFFORMULA;
+/
+CREATE PUBLIC SYNONYM FN_EVALUATE_RFFORMULA FOR ATISADMIN.FN_EVALUATE_RFFORMULA;
+
+CREATE OR REPLACE PROCEDURE ATISADMIN.SP_EVALUATE_RFFORMULA(
+    p_formula_id in VARCHAR2,
+    p_refe_rate_1 NUMBER,
+    p_refe_rate_2 NUMBER,
+    p_refe_rate_3 NUMBER,
+    p_fixed_amount_1 NUMBER,
+    p_fixed_amount_2 NUMBER,
+    p_fixed_amount_3 NUMBER,
+    p_fixed_fx_1 NUMBER,
+    p_fixed_fx_2 NUMBER,
+    p_number NUMBER,
+    p_margin_basis_points NUMBER,
+    p_min_rate NUMBER,
+    p_max_rate NUMBER,
+    p_min_amt NUMBER,
+    p_max_amt NUMBER,
+    p_result_var OUT VARCHAR2,
+    p_result_value OUT NUMBER,
+    p_error_msg OUT     VARCHAR2
+    ) is
+        L_REFE_RATE NUMBER;
+        L_REC ATISADMIN.CRFFORMULA_VARIABLES%ROWTYPE;
+        L_FORMULA_ID            VARCHAR2(20);
+        L_FORMULA_EXPR            VARCHAR2(500);
+        L_FORMULA            VARCHAR2(500);
+        L_FORMULA_POS            NUMBER;
+		
+        TYPE variable_array IS TABLE OF NUMBER INDEX BY VARCHAR2(100);
+        l_variable variable_array ;
+        CURSOR CUR_CRFFORMULA_VARIABLE(V_FORMULA_ID IN  VARCHAR2) IS 
+         SELECT VARIABLE_ID,VARIABLE_NAME,VARIABLE_DESC,IS_REF_RATE FROM ATISADMIN.CRFFORMULA_VARIABLES
+            WHERE 
+                VARIABLE_ID IN ( 
+            SELECT
+                 VARIABLE_ID         
+            FROM
+                 ATISADMIN.CRFFORMULA_DTL
+            WHERE
+                FORMULA_ID=V_FORMULA_ID);    
+
+BEGIN
+	L_FORMULA_ID:=p_formula_id;
+	SELECT UPPER(FORMULA_EXPR) INTO L_FORMULA_EXPR FROM ATISADMIN.CRFFORMULA	WHERE	FORMULA_ID =L_FORMULA_ID;
+	L_FORMULA_EXPR:=REPLACE(L_FORMULA_EXPR,' ','');
+	if p_refe_rate_1 IS NOT NULL AND p_refe_rate_1 <> -1 THEN 
+	   l_variable('RefRate1'):=p_refe_rate_1;
+	END IF;
+	if p_refe_rate_2 IS NOT NULL AND p_refe_rate_2 <> -1 THEN 
+		l_variable('RefRate2'):=p_refe_rate_2;
+	END IF;
+	if p_refe_rate_3 IS NOT NULL AND p_refe_rate_3 <> -1 THEN 
+		l_variable('RefRate3'):=p_refe_rate_3;
+	END IF;
+	if p_fixed_amount_1 IS NOT NULL AND p_fixed_amount_1 <>-1 THEN 
+		l_variable('FixAmt1'):=p_fixed_amount_1;
+	END IF;    
+	if p_fixed_amount_2 IS NOT NULL AND p_fixed_amount_2 <> -1 THEN 
+		l_variable('FixAmt2'):=p_fixed_amount_2;
+	END IF;
+	if p_fixed_amount_3 IS NOT NULL AND p_fixed_amount_3 <> -1  THEN 
+		 l_variable('FixAmt3'):=p_fixed_amount_3;
+	END IF;
+	if p_fixed_fx_1 IS NOT NULL AND p_fixed_fx_1<> -1 THEN 
+		l_variable('FixFX1'):=p_fixed_fx_1;
+	END IF;
+	if p_fixed_fx_2 IS NOT NULL AND p_fixed_fx_2 <> -1  THEN 
+		l_variable('FixFX2'):=p_fixed_fx_2;
+	END IF;
+	if p_number IS NOT NULL AND p_number <> -1 THEN 
+		 l_variable('Number'):=p_number;
+	END IF;
+	 if p_margin_basis_points IS NOT NULL AND p_margin_basis_points <> -1 THEN 
+		l_variable('Margin'):=p_margin_basis_points;
+	END IF;
+	if p_min_rate IS NOT NULL AND p_min_rate <> -1 THEN 
+			l_variable('MinRate'):=p_min_rate;
+	END IF;
+	if p_max_rate IS NOT NULL AND p_max_rate<> -1 THEN 
+			l_variable('MaxRate'):=p_max_rate;
+	END IF;
+	if p_min_amt IS NOT NULL AND p_min_amt <> -1 THEN 
+			l_variable('MinAmt'):=p_min_amt;
+	END IF;
+	if p_max_amt IS NOT NULL AND p_max_amt <> -1 THEN 
+		l_variable('MaxAmt'):=p_max_amt;        
+	END IF;        
+	L_FORMULA_POS:=INSTR(L_FORMULA_EXPR,'=');
+	p_result_var:=UPPER(SUBSTR(L_FORMULA_EXPR,0,L_FORMULA_POS-1));
+	L_FORMULA:=SUBSTR(L_FORMULA_EXPR,L_FORMULA_POS+1,LENGTH(L_FORMULA_EXPR)-L_FORMULA_POS);
+	OPEN CUR_CRFFORMULA_VARIABLE(L_FORMULA_ID);
+	LOOP 
+		FETCH CUR_CRFFORMULA_VARIABLE INTO L_REC;
+			EXIT WHEN CUR_CRFFORMULA_VARIABLE%NOTFOUND;
+				IF INSTR(L_FORMULA,UPPER(L_REC.VARIABLE_NAME)) > 0 THEN
+					IF l_variable.EXISTS(L_REC.VARIABLE_NAME) AND l_variable(L_REC.VARIABLE_NAME) IS NOT NULL  AND TO_NUMBER(l_variable(L_REC.VARIABLE_NAME)) <> -1  THEN                            
+						L_FORMULA:=replace(L_FORMULA,UPPER(L_REC.VARIABLE_NAME),l_variable(L_REC.VARIABLE_NAME));		                            
+					ELSE                            
+						IF p_error_msg IS NOT NULL THEN
+							p_error_msg:=p_error_msg || ',' || L_REC.VARIABLE_NAME;
+						ELSE
+							p_error_msg:=L_REC.VARIABLE_NAME;
+						END IF;
+					END IF;
+				END IF;                    
+	END LOOP;
+	IF p_error_msg IS NOT NULL THEN
+		p_error_msg:= p_error_msg || ' cannot be null for ' || L_FORMULA_ID ;
+	ELSE		
+	p_result_value:=FN_EVALUATE_RFFORMULA(L_FORMULA);
+	END IF;
+EXCEPTION WHEN OTHERS THEN
+        p_error_msg := substr('ERROR_STACK: ' || dbms_utility.format_error_stack || 'ERROR_BACKTRACE: '  || dbms_utility.format_error_backtrace,1,4000);
+END SP_EVALUATE_RFFORMULA;
+/
+
+CREATE PUBLIC SYNONYM SP_EVALUATE_RFFORMULA FOR ATISADMIN.SP_EVALUATE_RFFORMULA;
+
+/*END MIG-20190606001*/
